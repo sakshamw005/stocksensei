@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 90 17% 95%;
+    --foreground: 222 51% 16%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 51% 16%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 51% 16%;
+    --primary: 222 51% 16%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 98 11% 93%;
+    --secondary-foreground: 222 51% 16%;
+    --muted: 90 14% 93%;
+    --muted-foreground: 217 12% 39%;
+    --accent: 98 11% 90%;
+    --accent-foreground: 222 51% 16%;
+    --destructive: 7 59% 42%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 98 11% 86%;
+    --input: 98 11% 86%;
+    --ring: 222 51% 16%;
+    --radius: 3px;
+    --font-heading: 'Fraunces', ui-serif, Georgia, serif;
+    --font-body: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    --font-display: 'Fraunces', ui-serif, Georgia, serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --font-data: 'IBM Plex Mono', ui-monospace, monospace;
+    --chart-1: 36 66% 48%;
+    --chart-2: 150 56% 28%;
+    --chart-3: 7 59% 42%;
+    --chart-4: 222 51% 16%;
+    --chart-5: 98 11% 50%;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 222 51% 16%;
+    --sidebar-primary: 222 51% 16%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 90 14% 93%;
+    --sidebar-accent-foreground: 222 51% 16%;
+    --sidebar-border: 98 11% 86%;
+    --sidebar-ring: 222 51% 16%;
+  }
+
+  .dark {
+    --background: 222 51% 10%;
+    --foreground: 90 17% 95%;
+    --card: 222 40% 14%;
+    --card-foreground: 90 17% 95%;
+    --popover: 222 40% 14%;
+    --popover-foreground: 90 17% 95%;
+    --primary: 90 17% 95%;
+    --primary-foreground: 222 51% 16%;
+    --secondary: 222 30% 20%;
+    --secondary-foreground: 90 17% 95%;
+    --muted: 222 30% 20%;
+    --muted-foreground: 213 12% 60%;
+    --accent: 222 30% 22%;
+    --accent-foreground: 90 17% 95%;
+    --destructive: 7 59% 42%;
+    --destructive-foreground: 90 17% 95%;
+    --border: 222 30% 24%;
+    --input: 222 30% 24%;
+    --ring: 90 17% 95%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-body;
+  }
+}
