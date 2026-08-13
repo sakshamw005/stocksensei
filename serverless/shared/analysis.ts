@@ -7,10 +7,11 @@ export const RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
     paragraph: { type: 'string', description: 'A 2-3 sentence plain-language analysis consistent with the provided signals, using only the numbers supplied.' },
-    agreement: { type: 'string', enum: ['agree', 'disagree'] },
+    call: { type: 'string', enum: ['bullish', 'bearish', 'neutral'] },
+    agreement: { type: 'string', enum: ['agree', 'disagree', 'neutral'] },
     insufficient: { type: 'boolean' }
   },
-  required: ['paragraph', 'agreement', 'insufficient']
+  required: ['paragraph', 'call', 'insufficient']
 };
 
 function statusFromCount(bull, bear) {
@@ -37,10 +38,11 @@ export function computeStockSignals(d) {
   if (c.sector_trend) sector = c.sector_trend === 'up' ? 'positive' : c.sector_trend === 'down' ? 'negative' : 'neutral';
   const signals = { fundamentals, news, sector };
   const dirs = [fundamentals, news, sector].filter((x) => x !== 'neutral');
-  let agreement = 'disagree';
+  const hasAnyData = Object.keys(f).length > 0 || Object.keys(s).length > 0 || Object.keys(c).length > 0;
+  let agreement = 'neutral';
   let insufficient = false;
-  if (dirs.length < 2) insufficient = true;
-  else agreement = dirs.every((x) => x === dirs[0]) ? 'agree' : 'disagree';
+  if (!hasAnyData) insufficient = true;
+  else if (dirs.length >= 2) agreement = dirs.every((x) => x === dirs[0]) ? 'agree' : 'disagree';
   return { signals, agreement, insufficient };
 }
 
@@ -79,19 +81,29 @@ export function computeIpoSignals(ipo, gmp) {
   return { signals, agreement, insufficient };
 }
 
+export function determineBullishCall(signals) {
+  const values = Object.values(signals || {});
+  const positive = values.filter((v) => v === 'positive').length;
+  const negative = values.filter((v) => v === 'negative').length;
+  if (positive > negative) return 'bullish';
+  if (negative > positive) return 'bearish';
+  return 'neutral';
+}
+
 export function buildStockPrompt(d, r) {
   const f = d.fundamentals || {};
   const s = d.sentiment || {};
   const c = d.company || {};
-  return `You are an equity analyst. Using ONLY the data below, write a 2-3 sentence analysis of the company. Do not invent or estimate any number not present. If a field is missing, do not fill it with a guess.
+  const topHeadlines = Array.isArray(s.top_headlines) ? s.top_headlines.slice(0, 5).map((item) => String(item)).join(' | ') : 'n/a';
+  return `You are an equity analyst. Using ONLY the data below, write a 2-3 sentence analysis of the company. Do not invent or estimate any number not present. If a field is missing, do not fill it with a guess. Ground the conclusion only in the fetched fundamentals row, the fetched news_sentiment row, and the company sector.
 
 Company: ${c.name || 'n/a'} (${c.ticker}), exchange ${c.exchange || 'n/a'}, sector ${c.sector || 'n/a'}, sector trend ${c.sector_trend || 'n/a'}.
 Current price: ${c.current_price ?? 'n/a'}.
-Fundamentals (as of ${f.as_of || 'n/a'}): market cap ${f.market_cap ?? 'n/a'}, P/E ${f.pe_ratio ?? 'n/a'}, industry P/E ${f.industry_pe ?? 'n/a'}, P/B ${f.pb_ratio ?? 'n/a'}, EPS ${f.eps ?? 'n/a'}, book value ${f.book_value ?? 'n/a'}, face value ${f.face_value ?? 'n/a'}, EBITDA ${f.ebitda ?? 'n/a'}, ROE ${f.roe ?? 'n/a'}, debt-to-equity ${f.debt_to_equity ?? 'n/a'}, profit growth YoY ${f.profit_growth_yoy ?? 'n/a'}, revenue growth QoQ ${f.revenue_growth_qoq ?? 'n/a'}, dividend yield ${f.dividend_yield ?? 'n/a'}, free cash flow ${f.free_cash_flow ?? 'n/a'}.
-News sentiment: score ${s.score ?? 'n/a'} (${s.label || 'n/a'}): ${s.summary || 'n/a'}.
+Fundamentals row (as of ${f.as_of || 'n/a'}): market cap ${f.market_cap ?? 'n/a'}, P/E ${f.pe_ratio ?? 'n/a'}, industry P/E ${f.industry_pe ?? 'n/a'}, P/B ${f.pb_ratio ?? 'n/a'}, EPS ${f.eps ?? 'n/a'}, book value ${f.book_value ?? 'n/a'}, face value ${f.face_value ?? 'n/a'}, EBITDA ${f.ebitda ?? 'n/a'}, ROE ${f.roe ?? 'n/a'}, debt-to-equity ${f.debt_to_equity ?? 'n/a'}, profit growth YoY ${f.profit_growth_yoy ?? 'n/a'}, revenue growth QoQ ${f.revenue_growth_qoq ?? 'n/a'}, dividend yield ${f.dividend_yield ?? 'n/a'}, free cash flow ${f.free_cash_flow ?? 'n/a'}.
+News sentiment row: score ${s.score ?? 'n/a'} (${s.label || 'n/a'}), summary ${s.summary || 'n/a'}, top_headlines ${topHeadlines}.
 
-Computed signals: fundamentals ${r.signals.fundamentals}, news ${r.signals.news}, sector ${r.signals.sector}. Overall the signals ${r.agreement === 'agree' ? 'agree' : 'disagree'}.
-If the signals agree, explain why the picture is consistent. If they disagree, explain the conflict plainly. Return JSON.`;
+Computed signals: fundamentals ${r.signals.fundamentals}, news ${r.signals.news}, sector ${r.signals.sector}. Aggregate these three inputs to choose a final call: bullish if the majority of the signal directions are positive, bearish if the majority are negative, and neutral if the data is mixed or not decisive.
+Return JSON with a "paragraph" string and a "call" field set to one of ['bullish', 'bearish', 'neutral']; do not use 'agree'/'disagree'.`;
 }
 
 export function buildEtfPrompt(etf, sentiment, r) {

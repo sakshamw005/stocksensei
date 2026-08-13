@@ -1,6 +1,6 @@
 import Stamp from './Stamp';
 
-export default function VerdictCard({ loading, agreement, paragraph, insufficient, sources }) {
+export default function VerdictCard({ loading, call, agreement, paragraph, insufficient, sources }) {
   return (
     <div className="border border-line bg-paper-raised rounded-[3px] p-6">
       <div className="mb-4">
@@ -11,7 +11,7 @@ export default function VerdictCard({ loading, agreement, paragraph, insufficien
             <span className="font-data text-xs uppercase tracking-widest text-ink-faint">INSUFFICIENT DATA</span>
           </div>
         ) : (
-          <Stamp agreement={agreement} />
+          <Stamp call={call} agreement={agreement} />
         )}
       </div>
       {loading ? (

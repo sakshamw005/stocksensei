@@ -43,6 +43,20 @@ def run_fundamentals(sb):
 
     if rows:
         sb.table("fundamentals").upsert(rows, on_conflict="ticker,as_of").execute()
+
+        company_rows = []
+        for row in rows:
+            company_rows.append({
+                "ticker": row["ticker"],
+                "name": next((name for t, name, _, _ in TIER1_COMPANIES if t == row["ticker"]), row["ticker"]),
+                "sector": next((sector for t, _, sector, _ in TIER1_COMPANIES if t == row["ticker"]), None),
+                "exchange": next((exchange for t, _, _, exchange in TIER1_COMPANIES if t == row["ticker"]), "NSE"),
+                "tier": 1,
+                "current_price": row.get("price"),
+                "as_of": row.get("as_of"),
+            })
+        sb.table("companies").upsert(company_rows, on_conflict="ticker").execute()
+
     print(f"fundamentals: upserted {len(rows)} rows")
 
 
@@ -51,16 +65,18 @@ def run_sentiment(sb):
     for ticker, name, sector, exchange in TIER1_COMPANIES:
         headlines = fetch_headlines(name, max_items=MAX_HEADLINES_PER_COMPANY)
         scored = score_headlines(headlines)
-        if scored["sentiment_label"] is None:
+        if scored["label"] is None:
             print(f"  skip (no headlines): {ticker}")
             continue
 
         rows.append({
             "ticker": ticker,
-            "sentiment_label": scored["sentiment_label"],
+            "score": scored["score"],
+            "label": scored["label"],
+            "summary": scored["summary"],
             "article_count": scored["article_count"],
-            "window_days": NEWS_WINDOW_DAYS,
             "top_headlines": scored["top_headlines"],
+            "window_days": NEWS_WINDOW_DAYS,
             "as_of": __import__("datetime").date.today().isoformat(),
         })
 

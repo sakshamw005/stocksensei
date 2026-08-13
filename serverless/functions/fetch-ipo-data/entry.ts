@@ -2,6 +2,8 @@ const db = globalThis.__STOCKSENSEI_DB__ || { auth:{ isAuthenticated: async()=>f
 
 import { createClientFromRequest } from '../../shared/serverlessShim';
 import { restGet } from '../../shared/supabase.ts';
+import { fetchGmpForIpo, fetchTwelveIpoCalendar } from '../../shared/vendorClients';
+import { getCache, setCache } from '../../shared/cache';
 
 export default async function(req) {
   try {
@@ -20,9 +22,25 @@ export default async function(req) {
     const ipo = (ipos && ipos[0]) || null;
     if (!ipo) return Response.json({ status: 'no_data' });
 
-    let gmp = [];
-    try { gmp = await restGet(db, 'gmp_history', `select=date,premium&ipo_id=eq.${encodeURIComponent(ipoId)}&order=date.asc&limit=200`); } catch (e) {}
-    return Response.json({ ipo, gmp: gmp || [] });
+    // Fetch live GMP from aggregators and IPO calendar from Twelve Data (if available).
+    const gmpCacheKey = `ipo_gmp:${ipo.id}`;
+    let gmp = getCache(gmpCacheKey);
+    if (!gmp) {
+      const live = await fetchGmpForIpo(ipo.ticker).catch(() => null);
+      // Normalise to array of { date, premium }
+      if (Array.isArray(live)) gmp = live; else if (live && live.premium != null) gmp = [{ date: new Date().toISOString(), premium: live.premium }]; else gmp = [];
+      setCache(gmpCacheKey, gmp, 2 * 60 * 1000); // cache for 2 minutes
+    }
+
+    let ipoCalendarEntry = null;
+    try {
+      const calendar = await fetchTwelveIpoCalendar().catch(() => null);
+      if (calendar && Array.isArray(calendar.data)) {
+        ipoCalendarEntry = calendar.data.find((x) => x.symbol === ipo.ticker || x.ticker === ipo.ticker || x.company === ipo.company_name) || null;
+      }
+    } catch (e) {}
+
+    return Response.json({ ipo, gmp: gmp || [], ipo_calendar: ipoCalendarEntry });
   } catch (error) {
     return Response.json({ error: error.message }, { status: 500 });
   }

@@ -1,5 +1,10 @@
-export default function Stamp({ agreement }) {
-  const text = agreement === 'agree' ? 'SIGNALS AGREE' : 'SIGNALS DISAGREE';
+export default function Stamp({ call, agreement }) {
+  const normalized = (call || agreement || 'neutral').toLowerCase();
+  const text =
+    normalized === 'bullish' || normalized === 'agree' ? 'BULLISH' :
+    normalized === 'bearish' || normalized === 'disagree' ? 'BEARISH' :
+    'NEUTRAL';
+
   return (
     <div className="inline-block -rotate-3">
       <div className="border-2 border-mustard">

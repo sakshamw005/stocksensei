@@ -1,6 +1,6 @@
 import db from '@/api/dbClient';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import StockSearch from '@/components/StockSearch';
 import { StatGrid, StatCell } from '@/components/ui/StatGrid';
@@ -17,33 +17,51 @@ export default function Analyze() {
   const [loadingVerdict, setLoadingVerdict] = useState(false);
   const [error, setError] = useState(null);
 
+  useEffect(() => {
+    document.title = 'Stocksensei | Stocks';
+    return () => {
+      document.title = 'Stocksensei';
+    };
+  }, []);
+
   const onSelect = async (r) => {
     setSel(r);
-    setData(null); setVerdict(null); setError(null);
+    setData(null);
+    setVerdict(null);
+    setError(null);
+    setLoadingVerdict(false);
     setLoadingData(true);
+
     try {
       const fn = r.kind === 'etf' ? 'fetch-etf-data' : 'fetch-company-data';
       const res = await db.functions.invoke(fn, { ticker: r.ticker });
       setData(res.data);
-      setLoadingData(false);
-      if (res.data?.status === 'no_data' || res.data?.insufficient) {
-        setLoadingVerdict(true);
-        const ares = await db.functions.invoke('generate-analysis', r.kind === 'etf' ? { ticker: r.ticker, is_etf: true } : { ticker: r.ticker });
-        setVerdict(ares.data);
-      } else {
-        setLoadingVerdict(true);
-        const ares = await db.functions.invoke('generate-analysis', r.kind === 'etf' ? { ticker: r.ticker, is_etf: true } : { ticker: r.ticker });
-        setVerdict(ares.data);
-      }
     } catch (e) {
       setError(e.response?.data?.error || e.message);
+    } finally {
+      setLoadingData(false);
     }
-    setLoadingData(false);
-    setLoadingVerdict(false);
+  };
+
+  const handleAnalyze = async () => {
+    if (!sel) return;
+    setLoadingVerdict(true);
+    setError(null);
+    setVerdict(null);
+
+    try {
+      const payload = sel.kind === 'etf' ? { ticker: sel.ticker, is_etf: true } : { ticker: sel.ticker };
+      const res = await db.functions.invoke('generate-analysis', payload);
+      setVerdict(res.data);
+    } catch (e) {
+      setError(e.response?.data?.error || e.message);
+    } finally {
+      setLoadingVerdict(false);
+    }
   };
 
   const switchMode = (m) => {
-    setMode(m); setSel(null); setData(null); setVerdict(null); setError(null);
+    setMode(m); setSel(null); setData(null); setVerdict(null); setError(null); setLoadingVerdict(false);
   };
 
   const noData = data?.status === 'no_data';
@@ -52,7 +70,7 @@ export default function Analyze() {
     <div className="space-y-8">
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-heading text-3xl font-semibold text-ink">Analyze</h1>
+          <h1 className="font-heading text-3xl font-semibold text-ink">Stocks</h1>
           <p className="font-body text-sm text-ink-soft mt-1">Search the full NSE + BSE universe, or switch to ETFs.</p>
         </div>
         <div className="flex border border-line rounded-[3px] overflow-hidden">
@@ -75,7 +93,39 @@ export default function Analyze() {
       )}
 
       {sel && loadingData && (
-        <div className="border border-line bg-paper-raised rounded-[3px] p-6 font-data text-sm text-ink-faint">Fetching {sel.ticker}…</div>
+        <div className="space-y-6">
+          <div className="border border-line bg-paper-raised rounded-[3px] p-5 flex items-center justify-between gap-4 flex-wrap">
+            <div>
+              <div className="font-heading text-2xl font-semibold text-ink">{sel.name || sel.ticker}</div>
+              <div className="font-data text-sm text-ink-soft mt-0.5">{sel.ticker}</div>
+            </div>
+            <div className="text-right">
+              <div className="font-data text-[10px] uppercase tracking-wider text-ink-faint">Current Price</div>
+              <div className="font-data text-2xl font-medium text-ink">Loading…</div>
+            </div>
+          </div>
+
+          <div className="border border-line bg-paper-raised rounded-[3px] p-6">
+            <div className="font-data text-xs uppercase tracking-widest text-ink-faint mb-2">Loading data</div>
+            <div className="mb-4">Please wait while live data is fetched.</div>
+            <StatGrid>
+              <StatCell label="Market Cap" value={'Loading…'} />
+              <StatCell label="Face Value" value={'—'} />
+              <StatCell label="Book Value" value={'—'} />
+              <StatCell label="EPS" value={'—'} />
+              <StatCell label="P/E Ratio" value={'—'} />
+              <StatCell label="Industry P/E" value={'—'} />
+              <StatCell label="P/B Ratio" value={'—'} />
+              <StatCell label="EBITDA" value={'—'} />
+              <StatCell label="Profit Growth YoY" value={'—'} />
+              <StatCell label="Revenue Growth QoQ" value={'—'} />
+              <StatCell label="Debt-to-Equity" value={'—'} />
+              <StatCell label="ROE" value={'—'} />
+            </StatGrid>
+          </div>
+
+          <SignalStrip items={[{ label: 'Fundamentals', status: 'neutral' }, { label: 'News Sentiment', status: 'neutral' }, { label: 'Sector Trend', status: 'neutral' }]} />
+        </div>
       )}
 
       {sel && data && !loadingData && (
@@ -117,13 +167,41 @@ export default function Analyze() {
             </>
           )}
 
-          <VerdictCard
-            loading={loadingVerdict}
-            agreement={verdict?.agreement}
-            paragraph={verdict?.paragraph}
-            insufficient={verdict?.insufficient}
-            sources={verdict?.sources}
-          />
+          {!noData && !loadingData && !loadingVerdict && !verdict && data && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleAnalyze}
+                className="inline-flex items-center justify-center border border-ink bg-ink px-4 py-2 font-body text-sm font-medium text-paper-raised transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
+                disabled={loadingVerdict}
+              >
+                {loadingVerdict ? 'Analyzing…' : 'Analyze'}
+              </button>
+            </div>
+          )}
+
+          {loadingVerdict && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center justify-center border border-ink bg-ink px-4 py-2 font-body text-sm font-medium text-paper-raised opacity-70 cursor-not-allowed"
+              >
+                Analyzing…
+              </button>
+            </div>
+          )}
+
+          {verdict && (
+            <VerdictCard
+              loading={false}
+              call={verdict?.call || verdict?.agreement}
+              agreement={verdict?.agreement}
+              paragraph={verdict?.paragraph}
+              insufficient={verdict?.insufficient}
+              sources={verdict?.sources}
+            />
+          )}
         </div>
       )}
     </div>
@@ -139,7 +217,6 @@ function StockStats({ data }) {
       <StatCell label="Book Value" value={formatPrice(f.book_value)} />
       <StatCell label="EPS" value={formatPrice(f.eps)} />
       <StatCell label="P/E Ratio" value={formatRatio(f.pe_ratio)} />
-      <StatCell label="Industry P/E" value={formatRatio(f.industry_pe)} />
       <StatCell label="P/B Ratio" value={formatRatio(f.pb_ratio)} />
       <StatCell label="EBITDA" value={formatCompact(f.ebitda)} />
       <StatCell label="Profit Growth YoY" value={formatPercent(f.profit_growth_yoy)} tone={f.profit_growth_yoy >= 0 ? 'gain' : 'loss'} />

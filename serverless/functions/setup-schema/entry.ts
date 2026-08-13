@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS companies (
 CREATE TABLE IF NOT EXISTS fundamentals (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ticker text,
+  price numeric,
   market_cap numeric,
   face_value numeric,
   book_value numeric,
@@ -43,6 +44,8 @@ CREATE TABLE IF NOT EXISTS news_sentiment (
   score numeric,
   label text,
   summary text,
+  top_headlines text,
+  article_count int,
   as_of timestamptz
 );
 CREATE TABLE IF NOT EXISTS etfs (

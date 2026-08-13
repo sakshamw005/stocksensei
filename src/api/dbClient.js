@@ -747,20 +747,80 @@ export const db = {
       }
       
       if (name === 'fetch-company-data') {
-        const { ticker } = args;
-        const d = getMockStockData(ticker);
-        const { signals, agreement, insufficient } = computeStockSignals(d);
+        const ticker = String(args?.ticker || '').trim();
+        const normalized = ticker.toUpperCase();
+        if (!normalized) {
+          return { data: { status: 'no_data', ticker: normalized } };
+        }
+
+        const companyRes = await supabaseFetch(`/companies?ticker=eq.${encodeURIComponent(normalized)}&select=*&limit=1`);
+        const company = Array.isArray(companyRes) ? companyRes[0] : null;
+        if (!company) {
+          return {
+            data: {
+              cached: false,
+              status: 'no_data',
+              ticker: normalized,
+              company: { name: null, exchange: null, sector: null }
+            }
+          };
+        }
+
+        let fundamentals = null;
+        let sentiment = null;
+
+        try {
+          const fundamentalsRes = await supabaseFetch(`/fundamentals?ticker=eq.${encodeURIComponent(normalized)}&select=*&order=as_of.desc&limit=1`);
+          fundamentals = Array.isArray(fundamentalsRes) ? fundamentalsRes[0] : null;
+        } catch (e) {
+          console.error('Failed to load fundamentals row from Supabase:', e);
+        }
+
+        try {
+          const sentimentRes = await supabaseFetch(`/news_sentiment?ticker=eq.${encodeURIComponent(normalized)}&select=*&order=as_of.desc&limit=1`);
+          sentiment = Array.isArray(sentimentRes) ? sentimentRes[0] : null;
+        } catch (e) {
+          console.error('Failed to load news sentiment row from Supabase:', e);
+        }
+
+        if (!fundamentals && !sentiment) {
+          return {
+            data: {
+              cached: false,
+              status: 'no_data',
+              ticker: normalized,
+              tier: company.tier,
+              company: {
+                name: company.name,
+                exchange: company.exchange,
+                sector: company.sector
+              }
+            }
+          };
+        }
+
+        const normalisedCompany = {
+          ...company,
+          current_price: company.current_price ?? fundamentals?.price ?? null,
+          sector_trend: company.sector_trend ?? null
+        };
+
+        const { signals, agreement, insufficient } = computeStockSignals({ company: normalisedCompany, fundamentals, sentiment });
+        const hasAnyRowData = !!(fundamentals || sentiment || company);
+        const resolvedInsufficient = !hasAnyRowData ? true : insufficient;
+        const as_of = fundamentals?.as_of || sentiment?.as_of || company.as_of;
+
         return {
           data: {
             cached: true,
-            company: d.company,
-            fundamentals: d.fundamentals,
-            sentiment: d.sentiment,
+            company: normalisedCompany,
+            fundamentals,
+            sentiment,
             signals,
             agreement,
-            insufficient,
-            as_of: new Date().toISOString().split('T')[0],
-            tier: d.company.tier || 1,
+            insufficient: resolvedInsufficient,
+            as_of,
+            tier: company.tier || 1,
             stale: false
           }
         };
@@ -808,11 +868,13 @@ export const db = {
       
       if (name === 'generate-analysis') {
         const { ticker, is_etf, ipo_id } = args;
+
         if (ipo_id) {
           const ipo = MOCK_IPOS_DETAILS[ipo_id];
           const gmp = MOCK_GMP_HISTORY[ipo_id] || [];
           const { signals, agreement, insufficient } = computeIpoSignals(ipo, gmp);
-          
+          const call = signals.fundamentals === 'positive' ? 'bullish' : signals.fundamentals === 'negative' ? 'bearish' : 'neutral';
+
           let paragraph = `Analysis of ${ipo.company_name} (${ipo.ticker}) IPO. `;
           if (signals.fundamentals === 'positive') {
             paragraph += `The fundamentals show consistent financial growth with expansion in both revenue and net margins. `;
@@ -820,83 +882,148 @@ export const db = {
             paragraph += `Fundamentals are somewhat soft or declining. `;
           }
           if (signals.hype === 'positive') {
-            paragraph += `Hype in the grey market is very strong with a high premium of ₹${ipo.gmp_current}. `;
+            paragraph += `Hype in the grey market is very strong. `;
           } else {
             paragraph += `Grey market interest is relatively muted. `;
           }
-          if (agreement === 'agree') {
-            paragraph += `The premium matches the strong underlying business performance, presenting a consistent signal.`;
+          if (call === 'bullish') {
+            paragraph += `The premium aligns with the business performance, presenting a consistent opportunity.`;
+          } else if (call === 'bearish') {
+            paragraph += `The premium conflicts with the underlying fundamentals, suggesting caution.`;
           } else {
-            paragraph += `There is a conflict between the valuation premium and underlying fundamentals, suggesting caution.`;
+            paragraph += `The signal is mixed between the premium and the business metrics.`;
           }
-          
+
           return {
             data: {
               paragraph,
-              agreement,
+              call,
+              agreement: agreement === 'agree' ? 'agree' : agreement === 'disagree' ? 'disagree' : 'neutral',
               insufficient,
               sources: ['Draft Red Herring Prospectus (DRHP)', 'Grey Market Premium Tracker']
             }
           };
         }
-        
+
         if (is_etf) {
-          const d = getMockEtfData(ticker);
-          const { signals, agreement, insufficient } = computeEtfSignals(d.etf, d.sentiment);
-          
-          let paragraph = `Analysis of ${d.etf.name} (${d.etf.ticker}). `;
+          const normalizedTicker = String(ticker || '').trim().toUpperCase();
+          const etfRes = await supabaseFetch(`/etfs?ticker=eq.${encodeURIComponent(normalizedTicker)}&select=*&limit=1`);
+          const etf = Array.isArray(etfRes) ? etfRes[0] : null;
+          if (!etf) {
+            return { data: { error: 'ETF not found' } };
+          }
+
+          let sentiment = null;
+          if (etf.category) {
+            const sentRes = await supabaseFetch(`/news_sentiment?category=eq.${encodeURIComponent(etf.category)}&select=*&order=as_of.desc&limit=1`);
+            sentiment = Array.isArray(sentRes) ? sentRes[0] : null;
+          }
+
+          const { signals, agreement, insufficient } = computeEtfSignals(etf, sentiment);
+          const call = Object.values(signals).filter((v) => v === 'positive').length > Object.values(signals).filter((v) => v === 'negative').length ? 'bullish' : Object.values(signals).filter((v) => v === 'negative').length > Object.values(signals).filter((v) => v === 'positive').length ? 'bearish' : 'neutral';
+          const sources = `ETF metrics + category sentiment (${etf.category || 'n/a'}) as of ${etf.as_of || 'n/a'}`;
+          const headline = sentiment?.summary || 'No sentiment summary available.';
+          let paragraph = `Analysis of ${etf.name} (${etf.ticker}). `;
           if (signals.accuracy === 'positive') {
-            paragraph += `The ETF tracks its index with low tracking error (${d.etf.tracking_error}%). `;
+            paragraph += `The ETF tracks its index tightly. `;
+          } else if (signals.accuracy === 'negative') {
+            paragraph += `Tracking error is elevated. `;
           } else {
-            paragraph += `Tracking error is slightly elevated. `;
+            paragraph += `Tracking accuracy is mixed. `;
           }
           if (signals.liquidity === 'positive') {
-            paragraph += `AUM is substantial at ₹${(d.etf.aum / 10000000).toFixed(1)} Cr, indicating high liquidity. `;
+            paragraph += `AUM remains substantial, which supports liquidity. `;
+          } else if (signals.liquidity === 'negative') {
+            paragraph += `Liquidity looks comparatively thin. `;
           }
-          if (agreement === 'agree') {
-            paragraph += `Consistent signals across tracking performance and category news sentiment support the index choice.`;
+          paragraph += `The category sentiment is ${sentiment?.score != null ? (sentiment.score > 0 ? 'positive' : sentiment.score < 0 ? 'negative' : 'neutral') : 'not available'}: ${headline}. `;
+          if (call === 'bullish') {
+            paragraph += `Overall, the data points toward a constructive setup.`;
+          } else if (call === 'bearish') {
+            paragraph += `Overall, the data points toward a weaker setup.`;
           } else {
-            paragraph += `Mixed signals between performance tracking and category sentiment suggest reviewing allocation sizing.`;
+            paragraph += `Overall, the data is balanced and not decisive.`;
           }
-          
+
           return {
             data: {
               paragraph,
-              agreement,
+              call,
+              agreement: agreement === 'agree' ? 'agree' : agreement === 'disagree' ? 'disagree' : 'neutral',
               insufficient,
-              sources: ['Fund Fact Sheet', 'Exchange Data']
-            }
-          };
-        } else {
-          const d = getMockStockData(ticker);
-          const { signals, agreement, insufficient } = computeStockSignals(d);
-          
-          let paragraph = `Analysis of ${d.company.name} (${d.company.ticker}). `;
-          if (signals.fundamentals === 'positive') {
-            paragraph += `Fundamentals are robust with healthy ROE (${Math.round(d.fundamentals.roe * 100)}%) and comfortable debt levels. `;
-          } else {
-            paragraph += `Fundamentals exhibit some leverage or return pressures. `;
-          }
-          if (signals.news === 'positive') {
-            paragraph += `News sentiment is positive on recent operational milestones. `;
-          } else if (signals.news === 'negative') {
-            paragraph += `Sentiment is currently weighed down by macro issues. `;
-          }
-          if (agreement === 'agree') {
-            paragraph += `The operational strength aligns well with supportive news flow and sector momentum.`;
-          } else {
-            paragraph += `The mixed outlook suggests short-term news noise contrast with longer-term business stability.`;
-          }
-          
-          return {
-            data: {
-              paragraph,
-              agreement,
-              insufficient,
-              sources: ['Quarterly Earnings Release', 'Brokerage Analyst Consensus']
+              sources
             }
           };
         }
+
+        const normalizedTicker = String(ticker || '').trim().toUpperCase();
+        const companyRes = await supabaseFetch(`/companies?ticker=eq.${encodeURIComponent(normalizedTicker)}&select=*&limit=1`);
+        const company = Array.isArray(companyRes) ? companyRes[0] : null;
+        if (!company) {
+          return { data: { error: 'Company not found' } };
+        }
+
+        let fundamentals = null;
+        let sentiment = null;
+        try {
+          const fundamentalsRes = await supabaseFetch(`/fundamentals?ticker=eq.${encodeURIComponent(normalizedTicker)}&select=*&order=as_of.desc&limit=1`);
+          fundamentals = Array.isArray(fundamentalsRes) ? fundamentalsRes[0] : null;
+        } catch (e) {}
+        try {
+          const sentimentRes = await supabaseFetch(`/news_sentiment?ticker=eq.${encodeURIComponent(normalizedTicker)}&select=*&order=as_of.desc&limit=1`);
+          sentiment = Array.isArray(sentimentRes) ? sentimentRes[0] : null;
+        } catch (e) {}
+
+        const { signals, agreement, insufficient } = computeStockSignals({ company, fundamentals, sentiment });
+        const call = Object.values(signals).filter((v) => v === 'positive').length > Object.values(signals).filter((v) => v === 'negative').length ? 'bullish' : Object.values(signals).filter((v) => v === 'negative').length > Object.values(signals).filter((v) => v === 'positive').length ? 'bearish' : 'neutral';
+
+        if (insufficient) {
+          return {
+            data: {
+              paragraph: 'There is too little cached data or news coverage for this name to analyse meaningfully. Fundamentals, sentiment, or sector context are missing, so no confident signal can be drawn.',
+              call,
+              agreement: agreement === 'agree' ? 'agree' : agreement === 'disagree' ? 'disagree' : 'neutral',
+              insufficient: true,
+              sources: `Fundamentals + news sentiment as of ${(fundamentals && fundamentals.as_of) || (sentiment && sentiment.as_of) || company.as_of || 'n/a'}`
+            }
+          };
+        }
+
+        const headline = sentiment?.summary || 'No sentiment summary available.';
+        const topHeadlines = Array.isArray(sentiment?.top_headlines) ? sentiment.top_headlines.slice(0, 3).join(' | ') : 'No top headlines available.';
+        let paragraph = `Analysis of ${company.name} (${company.ticker}). `;
+        if (signals.fundamentals === 'positive') {
+          paragraph += `The fundamentals are favourable based on the cached row, including the reported operating metrics. `;
+        } else if (signals.fundamentals === 'negative') {
+          paragraph += `The fundamentals in the cached row point to weaker profit or leverage conditions. `;
+        } else {
+          paragraph += `The fundamental row is mixed rather than decisive. `;
+        }
+        if (signals.news === 'positive') {
+          paragraph += `News sentiment is positive, with recent headlines suggesting supportive momentum. `;
+        } else if (signals.news === 'negative') {
+          paragraph += `News sentiment is negative, with recent coverage highlighting pressure points. `;
+        } else {
+          paragraph += `News sentiment is neutral. `;
+        }
+        paragraph += `The company sector is ${company.sector || 'n/a'}, and the most relevant cached headlines are: ${topHeadlines}. `;
+        if (call === 'bullish') {
+          paragraph += `Taken together, the fundamentals, sentiment, and sector context support a bullish view.`;
+        } else if (call === 'bearish') {
+          paragraph += `Taken together, the fundamentals, sentiment, and sector context support a bearish view.`;
+        } else {
+          paragraph += `Taken together, the fundamentals, sentiment, and sector context are balanced and neutral.`;
+        }
+
+        return {
+          data: {
+            paragraph,
+            call,
+            agreement: agreement === 'agree' ? 'agree' : agreement === 'disagree' ? 'disagree' : 'neutral',
+            insufficient,
+            sources: `Fundamentals + news sentiment as of ${(fundamentals && fundamentals.as_of) || (sentiment && sentiment.as_of) || company.as_of || 'n/a'}`
+          }
+        };
       }
       
       throw new Error(`Function ${name} not implemented`);

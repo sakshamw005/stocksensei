@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 
 const tabs = [
   { to: '/learn', label: 'Learn' },
-  { to: '/analyze', label: 'Analyze' },
+  { to: '/analyze', label: 'Stocks' },
   { to: '/ipo', label: 'IPO' }
 ];
 

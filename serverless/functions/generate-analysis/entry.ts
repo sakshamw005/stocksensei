@@ -7,10 +7,13 @@ import {
   computeStockSignals,
   computeEtfSignals,
   computeIpoSignals,
+  determineBullishCall,
   buildStockPrompt,
   buildEtfPrompt,
   buildIpoPrompt
 } from '../../shared/analysis.ts';
+import { fetchTwelveQuote, fetchTwelveFundamentals, fetchGoogleNews, callGroq, fetchGmpForIpo, fetchTwelveIpoCalendar } from '../../shared/vendorClients';
+import { getCache, setCache } from '../../shared/cache';
 
 export default async function(req) {
   try {
@@ -20,65 +23,93 @@ export default async function(req) {
     const body = await req.json().catch(() => ({}));
     const { ticker, is_etf, ipo_id } = body;
 
-    let prompt, signals, agreement, insufficient, sources;
+    let prompt, signals, agreement, insufficient, sources, call;
 
     if (ipo_id != null) {
       const ipos = await restGet(db, 'ipos', `select=*&id=eq.${encodeURIComponent(ipo_id)}&limit=1`);
       const ipo = (ipos && ipos[0]) || null;
       if (!ipo) return Response.json({ error: 'IPO not found' }, { status: 404 });
       let gmp = [];
-      try { gmp = await restGet(db, 'gmp_history', `select=date,premium&ipo_id=eq.${encodeURIComponent(ipo_id)}&order=date.asc&limit=200`); } catch (e) {}
+      try {
+        const gmpCacheKey = `ipo_gmp:${ipo.id}`;
+        gmp = getCache(gmpCacheKey);
+        if (!gmp) {
+          const live = await fetchGmpForIpo(ipo.ticker).catch(() => null);
+          if (Array.isArray(live)) gmp = live; else if (live && live.premium != null) gmp = [{ date: new Date().toISOString(), premium: live.premium }]; else gmp = [];
+          setCache(gmpCacheKey, gmp, 2 * 60 * 1000);
+        }
+      } catch (e) {}
       const r = computeIpoSignals(ipo, gmp || []);
       signals = r.signals; agreement = r.agreement; insufficient = r.insufficient;
       sources = `IPO fundamentals + GMP history (${(gmp || []).length} points) as of ${ipo.as_of || 'n/a'}`;
       prompt = buildIpoPrompt(ipo, gmp || [], r);
-    } else if (is_etf) {
-      const etfs = await restGet(db, 'etfs', `select=*&ticker=eq.${encodeURIComponent(ticker)}&limit=1`);
-      const etf = (etfs && etfs[0]) || null;
-      if (!etf) return Response.json({ error: 'ETF not found' }, { status: 404 });
-      let sent = null;
-      if (etf.category) {
-        try { const s = await restGet(db, 'news_sentiment', `select=*&category=eq.${encodeURIComponent(etf.category)}&order=as_of.desc&limit=1`); sent = (s && s[0]) || null; } catch (e) {}
+      // Ask Claude to use web_search and include live facts. Add instruction to cite sources.
+      try {
+        // Fetch live headlines from Google News RSS for this IPO/company
+        const headlines = await fetchGoogleNews(`${ipo.company_name} ${ipo.ticker}`);
+        const headText = (headlines || []).slice(0, 8).map(h => `- ${h.title} (${h.source || 'source'}, ${h.pubDate || 'date'})`).join('\n');
+        const fullPrompt = `${prompt}\n\nHeadlines:\n${headText}\n\nUsing ONLY the fundamentals and the headlines above, write a 2-3 sentence analysis and then a line beginning with "Sources:" listing which headlines (by index or short title) and fundamentals you used. Finally output a line "Call: bullish|bearish|neutral".`;
+        const llmRes = await callGroq(fullPrompt, 'llama-3.3-70b-versatile');
+        // groq/openai-compatible response: extract message content if available
+        const content = llmRes?.choices?.[0]?.message?.content || llmRes?.choices?.[0]?.text || JSON.stringify(llmRes);
+        return Response.json({ analysis_raw: llmRes, paragraph: content, call: determineBullishCall(r.signals), agreement, insufficient, signals, sources });
+      } catch (e) {
+        return Response.json({ error: 'analysis temporarily unavailable', details: e.message }, { status: 503 });
       }
-      const r = computeEtfSignals(etf, sent);
-      signals = r.signals; agreement = r.agreement; insufficient = r.insufficient;
-      sources = `ETF metrics + category sentiment (${etf.category || 'n/a'}) as of ${etf.as_of || 'n/a'}`;
-      prompt = buildEtfPrompt(etf, sent, r);
+    } else if (is_etf) {
+      // Fetch live ETF fundamentals and quote from Twelve Data
+      try {
+        const quote = await fetchTwelveQuote(ticker);
+        if (!quote || (quote.symbol && quote.symbol !== ticker)) return Response.json({ error: 'ETF not found' }, { status: 404 });
+        const fund = await fetchTwelveFundamentals(ticker).catch(() => null);
+        const etf = { name: quote.name || quote.symbol, ticker: quote.symbol || ticker, category: fund?.category || null, tracked_index: fund?.index || null, expense_ratio: fund?.expense_ratio ?? null, tracking_error: fund?.tracking_error ?? null, aum: fund?.aum ?? null, as_of: new Date().toISOString() };
+        const r = computeEtfSignals(etf, null);
+        signals = r.signals; agreement = r.agreement; insufficient = r.insufficient;
+        sources = `ETF metrics as of ${etf.as_of}`;
+        prompt = buildEtfPrompt(etf, null, r);
+        try {
+          const headlines = await fetchGoogleNews(`${etf.name} ${etf.ticker}`);
+          const headText = (headlines || []).slice(0, 8).map(h => `- ${h.title} (${h.source || 'source'}, ${h.pubDate || 'date'})`).join('\n');
+          const fullPrompt = `${prompt}\n\nHeadlines:\n${headText}\n\nUsing ONLY the fundamentals and the headlines above, write a 2-3 sentence analysis and then a line beginning with "Sources:" listing which headlines (by index or short title) and fundamentals you used. Finally output a line "Call: bullish|bearish|neutral".`;
+          const llmRes = await callGroq(fullPrompt, 'llama-3.3-70b-versatile');
+          const content = llmRes?.choices?.[0]?.message?.content || llmRes?.choices?.[0]?.text || JSON.stringify(llmRes);
+          return Response.json({ analysis_raw: llmRes, paragraph: content, call: determineBullishCall(r.signals), agreement, insufficient, signals, sources });
+        } catch (e) {
+          return Response.json({ error: 'analysis temporarily unavailable', details: e.message }, { status: 503 });
+        }
+      } catch (e) {
+        return Response.json({ error: 'analysis temporarily unavailable', details: e.message }, { status: 503 });
+      }
     } else {
-      const companies = await restGet(db, 'companies', `select=*&ticker=eq.${encodeURIComponent(ticker)}&limit=1`);
-      const company = (companies && companies[0]) || null;
-      if (!company) return Response.json({ error: 'Company not found' }, { status: 404 });
-      let fund = null, sent = null;
-      try { const f = await restGet(db, 'fundamentals', `select=*&ticker=eq.${encodeURIComponent(ticker)}&order=as_of.desc&limit=1`); fund = (f && f[0]) || null; } catch (e) {}
-      try { const s = await restGet(db, 'news_sentiment', `select=*&ticker=eq.${encodeURIComponent(ticker)}&order=as_of.desc&limit=1`); sent = (s && s[0]) || null; } catch (e) {}
-      const r = computeStockSignals({ company, fundamentals: fund, sentiment: sent });
-      signals = r.signals; agreement = r.agreement; insufficient = r.insufficient;
-      sources = `Fundamentals + news sentiment as of ${(fund && fund.as_of) || (sent && sent.as_of) || company.as_of || 'n/a'}`;
-      prompt = buildStockPrompt({ company, fundamentals: fund, sentiment: sent }, r);
+      // Fetch live company quote + fundamentals from Twelve Data and call Claude with web_search
+      try {
+        const quote = await fetchTwelveQuote(ticker);
+        if (!quote || (quote.symbol && quote.symbol !== ticker)) return Response.json({ error: 'Company not found or ticker mismatch' }, { status: 404 });
+        const fund = await fetchTwelveFundamentals(ticker).catch(() => null);
+        const company = { name: quote.name || quote.symbol, ticker: quote.symbol || ticker, exchange: quote.exchange || 'n/a', sector: quote.sector || 'n/a', sector_trend: quote.sector_trend || null, current_price: quote.price ?? quote.close ?? null, as_of: new Date().toISOString() };
+        const r = computeStockSignals({ company, fundamentals: fund || {}, sentiment: null });
+        signals = r.signals; agreement = r.agreement; insufficient = r.insufficient;
+        call = determineBullishCall(r.signals);
+        sources = `Fundamentals fetched live as of ${company.as_of}`;
+        prompt = buildStockPrompt({ company, fundamentals: fund || {}, sentiment: null }, r);
+        try {
+          const headlines = await fetchGoogleNews(`${company.name} ${company.ticker}`);
+          const headText = (headlines || []).slice(0, 8).map(h => `- ${h.title} (${h.source || 'source'}, ${h.pubDate || 'date'})`).join('\n');
+          const fullPrompt = `${prompt}\n\nHeadlines:\n${headText}\n\nUsing ONLY the fundamentals and the headlines above, write a 2-3 sentence analysis and then a line beginning with "Sources:" listing which headlines (by index or short title) and fundamentals you used. Finally output a line "Call: bullish|bearish|neutral".`;
+          const llmRes = await callGroq(fullPrompt, 'llama-3.3-70b-versatile');
+          const content = llmRes?.choices?.[0]?.message?.content || llmRes?.choices?.[0]?.text || JSON.stringify(llmRes);
+          return Response.json({ analysis_raw: llmRes, paragraph: content, call: call || determineBullishCall(r.signals), agreement, insufficient, signals, sources });
+        } catch (e) {
+          return Response.json({ error: 'analysis temporarily unavailable', details: e.message }, { status: 503 });
+        }
+      } catch (e) {
+        return Response.json({ error: 'analysis temporarily unavailable', details: e.message }, { status: 503 });
+      }
     }
 
-    if (insufficient) {
-      return Response.json({
-        paragraph: 'There is too little cached data or news coverage for this name to analyse meaningfully. Fundamentals, sentiment, or sector context are missing, so no confident signal can be drawn.',
-        agreement,
-        insufficient: true,
-        signals,
-        sources
-      });
-    }
-
-    const llm = await db.asServiceRole.integrations.Core.InvokeLLM({
-      prompt,
-      response_json_schema: RESPONSE_SCHEMA
-    });
-    const out = typeof llm === 'string' ? JSON.parse(llm) : llm;
-    return Response.json({
-      paragraph: out.paragraph,
-      agreement: out.agreement || agreement,
-      insufficient: false,
-      signals,
-      sources
-    });
+    // All analysis branches return above using live Twelve Data + Google News + Groq.
+    // If execution reaches here, return an explicit error indicating analysis couldn't be produced.
+    return Response.json({ error: 'analysis path did not complete; unexpected state' }, { status: 500 });
   } catch (error) {
     return Response.json({ error: error.message }, { status: 500 });
   }

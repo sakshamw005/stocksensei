@@ -2,6 +2,7 @@ const db = globalThis.__STOCKSENSEI_DB__ || { auth:{ isAuthenticated: async()=>f
 
 import { createClientFromRequest } from '../../shared/serverlessShim';
 import { restGet } from '../../shared/supabase.ts';
+import { fetchTwelveSymbolSearch } from '../../shared/vendorClients';
 
 export default async function(req) {
   try {
@@ -12,21 +13,30 @@ export default async function(req) {
     const query = (body.query || '').trim();
     const mode = body.mode || 'stock';
     if (query.length < 1) return Response.json({ results: [] });
-    const ilike = encodeURIComponent(`*${query}*`);
+    // Use Twelve Data symbol search to allow searching the full exchange universe.
     let results = [];
-    if (mode !== 'etf') {
-      try {
-        const rows = await restGet(db, 'companies',
-          `select=ticker,name,exchange,tier&or=(ticker.ilike.${ilike},name.ilike.${ilike})&order=tier.asc,ticker.asc&limit=25`);
-        results = results.concat((rows || []).map((r) => ({ ticker: r.ticker, name: r.name, exchange: r.exchange, tier: r.tier, kind: 'stock' })));
-      } catch (e) { /* table may not exist yet */ }
-    }
-    if (mode === 'etf' || mode === 'all') {
-      try {
-        const rows = await restGet(db, 'etfs',
-          `select=ticker,name,category&or=(ticker.ilike.${ilike},name.ilike.${ilike})&order=ticker.asc&limit=25`);
-        results = results.concat((rows || []).map((r) => ({ ticker: r.ticker, name: r.name, exchange: 'ETF', tier: null, kind: 'etf' })));
-      } catch (e) { /* table may not exist yet */ }
+    try {
+      const searchResp = await fetchTwelveSymbolSearch(query, 25).catch(() => null);
+      const items = (searchResp && (searchResp.data || searchResp)) || [];
+      for (const it of items) {
+        const symbol = it.symbol || it.code || it.ticker || it[0];
+        const name = it.name || it.instrument_name || it.description || it[1] || '';
+        const exchange = it.exchange || it.exchange_short || '';
+        const kind = (name && /ETF/i.test(name)) || (it.type && it.type.toLowerCase() === 'etf') ? 'etf' : 'stock';
+        // Attach sector from Supabase companies table when available
+        let sector = null;
+        try {
+          const rows = await restGet(db, 'companies', `select=sector&ticker=eq.${encodeURIComponent(symbol)}&limit=1`);
+          const r = (rows && rows[0]) || null;
+          sector = r?.sector || null;
+        } catch (e) {}
+        // respect mode filter
+        if (mode === 'etf' && kind !== 'etf') continue;
+        if (mode === 'stock' && kind === 'etf') continue;
+        results.push({ ticker: symbol, name: name || symbol, exchange, sector, kind });
+      }
+    } catch (e) {
+      // fallback to empty results
     }
     return Response.json({ results });
   } catch (error) {

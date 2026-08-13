@@ -21,7 +21,7 @@ def score_headlines(headlines: list[dict]) -> dict:
     as 'mixed', not cancel out into a falsely calm 'neutral'."""
     titles = [h["title"] for h in headlines if h.get("title")]
     if not titles:
-        return {"sentiment_label": None, "article_count": 0, "top_headlines": None}
+        return {"score": None, "label": None, "summary": None, "article_count": 0, "top_headlines": None}
 
     pipe = _get_pipeline()
     results = pipe(titles, truncation=True)
@@ -38,15 +38,20 @@ def score_headlines(headlines: list[dict]) -> dict:
         label = "positive"
     elif neg_share >= 0.6:
         label = "negative"
-    elif pos_share > 0.25 and neg_share > 0.25:
-        label = "mixed"
     else:
         label = "neutral"
 
+    score = round(pos_share - neg_share, 4)
     top_headlines = " | ".join(titles[:3])
+    summary = (
+        f"{counts['positive']} positive, {counts['negative']} negative, {counts['neutral']} neutral headlines "
+        f"across {total} recent articles."
+    )
 
     return {
-        "sentiment_label": label,
+        "score": score,
+        "label": label,
+        "summary": summary,
         "article_count": total,
         "top_headlines": top_headlines,
     }

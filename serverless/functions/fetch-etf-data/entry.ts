@@ -1,8 +1,9 @@
 const db = globalThis.__STOCKSENSEI_DB__ || { auth:{ isAuthenticated: async()=>false, me: async()=>null }, entities:new Proxy({}, { get:()=>({ filter:async()=>[], get:async()=>null, create:async()=>({}), update:async()=>({}), delete:async()=>({}) }) }), integrations:{ Core:{ UploadFile:async()=>({ file_url:'' }) } } };
 
 import { createClientFromRequest } from '../../shared/serverlessShim';
-import { restGet } from '../../shared/supabase.ts';
 import { computeEtfSignals, daysSince } from '../../shared/analysis.ts';
+import { getCache, setCache } from '../../shared/cache';
+import { fetchTwelveQuote, fetchTwelveFundamentals } from '../../shared/vendorClients';
 
 export default async function(req) {
   try {
@@ -12,19 +13,32 @@ export default async function(req) {
     const body = await req.json().catch(() => ({}));
     const ticker = (body.ticker || '').trim();
     if (!ticker) return Response.json({ error: 'ticker required' }, { status: 400 });
+    const cacheKey = `etf:${ticker}`;
+    const cached = getCache(cacheKey);
+    if (cached) return Response.json({ cached: true, ...cached });
 
-    const etfs = await restGet(db, 'etfs', `select=*&ticker=eq.${encodeURIComponent(ticker)}&limit=1`);
-    const etf = (etfs && etfs[0]) || null;
-    if (!etf) return Response.json({ cached: false, status: 'no_data', ticker });
-
-    let sent = null;
-    if (etf.category) {
-      try { const s = await restGet(db, 'news_sentiment', `select=*&category=eq.${encodeURIComponent(etf.category)}&order=as_of.desc&limit=1`); sent = (s && s[0]) || null; } catch (e) {}
+    try {
+      const quote = await fetchTwelveQuote(ticker);
+      if (!quote || (quote.symbol && quote.symbol !== ticker)) {
+        return Response.json({ error: "couldn't confidently resolve this ticker", ticker }, { status: 422 });
+      }
+      const fund = await fetchTwelveFundamentals(ticker).catch(() => null);
+      const etf = {
+        name: quote.name || quote.symbol || ticker,
+        ticker: quote.symbol || ticker,
+        tracked_index: fund?.index || null,
+        expense_ratio: fund?.expense_ratio ?? null,
+        tracking_error: fund?.tracking_error ?? null,
+        aum: fund?.aum ?? null,
+        as_of: new Date().toISOString()
+      };
+      const r = computeEtfSignals(etf, null);
+      const result = { etf, sentiment: null, signals: r.signals, agreement: r.agreement, insufficient: r.insufficient, as_of: etf.as_of, stale: false };
+      setCache(cacheKey, result, 15 * 60 * 1000);
+      return Response.json({ cached: false, ...result });
+    } catch (e) {
+      return Response.json({ error: 'data temporarily unavailable', details: e.message }, { status: 503 });
     }
-    const { signals, agreement, insufficient } = computeEtfSignals(etf, sent);
-    const asOf = (sent && sent.as_of) || etf.as_of;
-    const stale = daysSince(asOf) != null && daysSince(asOf) > 10;
-    return Response.json({ cached: true, etf, sentiment: sent, signals, agreement, insufficient, as_of: asOf, stale });
   } catch (error) {
     return Response.json({ error: error.message }, { status: 500 });
   }
